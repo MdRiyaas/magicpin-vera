@@ -5,13 +5,6 @@
 **Track:** AI Engineering
 # Vera Message Composer — magicpin AI Challenge
 
-**Candidate:** Mohamed Riyaas R  
-**Email:** mdriyaas68@gmail.com  
-**Track:** AI Engineering
-Live Bot URL
-
-```bash
-https://magicpin-vera-qbve.onrender.com
 ---
 
 ## What I built
