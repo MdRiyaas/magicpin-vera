@@ -214,3 +214,10 @@ The challenge says free tools score the same as paid. Llama 3.3 70B at temperatu
 | `submission.jsonl` | 25 pre-generated outputs for all seed triggers |
 | `dataset/` | Seed data (categories, merchants, customers, triggers) |
 | `requirements.txt` | `flask`, `requests` |
+
+##  Live Bot URL
+
+```bash
+https://magicpin-vera-qbve.onrender.com
+
+
