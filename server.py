@@ -43,7 +43,11 @@ _dataset = None
 def get_dataset():
     global _dataset
     if _dataset is None:
-        _dataset = load_dataset("dataset")
+        import os
+        DATASET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset")
+        print("Dataset dir:", DATASET_DIR)
+        print("Files:", os.listdir(DATASET_DIR))
+        _dataset = load_dataset(DATASET_DIR)
     return _dataset
 
 def resolve_context(merchant_id: str, trigger_id: str, customer_id: str | None):
