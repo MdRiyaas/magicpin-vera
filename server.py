@@ -304,7 +304,15 @@ Return ONLY valid JSON."""
             "rationale": f"Fallback response due to compose error: {e}",
         }), 200
 
-
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "vera-live",
+        "message": "Magicpin Vera Bot is running",
+        "healthz": "/v1/healthz",
+        "metadata": "/v1/metadata"
+    }), 200
+  
 # ── GET /v1/healthz ───────────────────────────────────────────────────────────
 _start_time = time.time()
 
