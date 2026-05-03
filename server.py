@@ -116,7 +116,8 @@ def tick():
             "suppression_key": suppression_key,
             "rationale": "Trigger-based compliance outreach"
         })
-
+        sent_keys.add(tid)
+    
     return jsonify({"actions": actions}), 200
 
 
@@ -200,15 +201,12 @@ def reply():
 
     # Positive merchant response
     if any(x in msg for x in ["yes", "sure", "ok", "okay"]):
-        return jsonify({
-            "action": "send",
-            "body": (
-                f"Perfect, {merchant_name} — I’ll help you prepare for {regulation} "
-                f"before {deadline} right away."
-            ),
-            "cta": "none",
-            "rationale": "Positive merchant response"
-        }), 200
+    return jsonify({
+        "action": "send",
+        "body": f"Perfect, {merchant_name} — I’ll help you handle this right away.",
+        "cta": "none",
+        "rationale": "Positive merchant response"
+    }), 200
 
     # Exit merchant
     if any(x in msg for x in ["stop", "no", "cancel", "later"]):
@@ -248,17 +246,20 @@ def healthz():
     ])
 
     return jsonify({
-        "status": "ok",
-        "uptime_seconds": int(time.time() - _start),
-        "active_conversations": active_conversations,
-        "suppressed_keys": len(sent_keys),
-        "contexts_loaded": {
-            "category": len(store["category"]),
-            "merchant": len(store["merchant"]),
-            "customer": len(store["customer"]),
-            "trigger": len(store["trigger"])
-        }
-    }), 200
+    "status": "ok",
+    "uptime_seconds": int(time.time() - _start),
+    "contexts_loaded": {
+        "category": len(store["category"]),
+        "customer": len(store["customer"]),
+        "merchant": len(store["merchant"]),
+        "trigger": len(store["trigger"])
+    },
+    "active_conversations": len([
+        c for c in conversations.values()
+        if c.get("state") != "ended"
+    ]),
+    "suppressed_keys": len(sent_keys)
+}), 200
 
 
 # ── GET /v1/metadata ──────────────────────────────────────────────────────────
