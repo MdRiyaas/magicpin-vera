@@ -22,7 +22,7 @@ _start = time.time()
 def ctx():
     data = request.get_json(force=True)
 
-    scope = data.get("scope")
+    scope = (data.get("scope") or "").strip().lower()
     cid = data.get("context_id")
     ver = data.get("version", 1)
 
@@ -42,7 +42,7 @@ def ctx():
         "version": ver,
         "payload": data.get("payload", {})
     }
-
+    print("STORE DEBUG:", scope, list(store[scope].keys()))
     return jsonify({
         "accepted": True,
         "ack_id": f"ack_{uuid.uuid4().hex[:8]}",
