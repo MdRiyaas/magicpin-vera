@@ -59,9 +59,11 @@ def tick():
         if not merchant_id:
             continue
 
+        regulation = trigger.get("regulation", "your business compliance")
+        deadline = trigger.get("deadline", "soon")
+
         body = (
-            f"Hi! Important update regarding {trigger.get('regulation', 'your business')} "
-            f"before {trigger.get('deadline', 'soon')}. "
+            f"Hi! Important update regarding {regulation} before {deadline}. "
             f"Reply YES and I’ll help you handle it quickly."
         )
 
