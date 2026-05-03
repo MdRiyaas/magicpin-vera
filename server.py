@@ -2,11 +2,17 @@
 @app.route("/v1/tick", methods=["POST"])
 def tick():
     data = request.get_json(force=True)
-    trigger_ids = data.get("available_triggers", [])
+
+    # Support both challenge harness + manual testing
+    trigger_ids = (
+        data.get("available_triggers")
+        or ([data.get("trigger_id")] if data.get("trigger_id") else [])
+    )
+
     actions = []
 
     for tid in trigger_ids:
-        # Pull trigger from runtime store first, then dataset fallback
+        # Runtime store first → dataset fallback
         trigger_record = store["trigger"].get(tid, {})
         trigger = trigger_record.get("payload") or ds()["triggers"].get(tid)
 
@@ -20,17 +26,19 @@ def tick():
             app.logger.error(f"tick skip {tid}: suppressed ({sup})")
             continue
 
-        # Flexible ID extraction
+        # Flexible entity extraction
         mid = (
             trigger.get("merchant_id")
             or trigger.get("merchant")
             or trigger.get("merchantId")
+            or data.get("merchant_id")
         )
 
         cust_id = (
             trigger.get("customer_id")
             or trigger.get("customer")
             or trigger.get("customerId")
+            or data.get("customer_id")
         )
 
         if not mid:
@@ -38,15 +46,18 @@ def tick():
             continue
 
         try:
-            # Resolve all context
+            # Resolve primary context
             cat, mer, trg, cust = resolve(mid, tid, cust_id)
 
-            # Defensive merchant fallback
+            # Merchant hard fallback
+            if not mer:
+                mer = store["merchant"].get(mid, {}).get("payload") or ds()["merchants"].get(mid, {})
+
             if not mer:
                 app.logger.error(f"tick skip {tid}: merchant unresolved ({mid})")
                 continue
 
-            # Category fallback if category_slug missing
+            # Category fallback chain
             if not cat:
                 cat_slug = (
                     mer.get("category_slug")
@@ -54,16 +65,26 @@ def tick():
                     or mer.get("category")
                     or ""
                 )
-                cat = store["category"].get(cat_slug, {}).get("payload") or ds()["categories"].get(cat_slug, {})
 
-            # Compose message
-            result = compose(cat, mer, trg, cust)
+                cat = (
+                    store["category"].get(cat_slug, {}).get("payload")
+                    or ds()["categories"].get(cat_slug, {})
+                )
 
-            # Ensure valid body
+            # Trigger normalization
+            if not trg:
+                trg = trigger
+
+            trg.setdefault("kind", trg.get("trigger_kind", "generic"))
+
+            # Compose
+            result = compose(cat or {}, mer or {}, trg or {}, cust)
+
             if not result or not result.get("body"):
                 app.logger.error(f"tick skip {tid}: compose returned empty result")
                 continue
 
+            # Conversation creation
             conv_id = f"conv_{uuid.uuid4().hex[:8]}"
 
             conversations[conv_id] = {
