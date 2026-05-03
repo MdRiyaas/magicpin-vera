@@ -112,4 +112,4 @@ The challenge says free tools score the same as paid. Llama 3.3 70B at temperatu
 ## Live Bot URL
 
 ```bash
-https://magicpin-vera-qbve.onrender.com
+(https://magicpin-vera-p2ls.onrender.com)
