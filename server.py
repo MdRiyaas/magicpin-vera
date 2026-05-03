@@ -1,4 +1,47 @@
-# ── POST /v1/tick ─────────────────────────────────────────────────────────────
+from flask import Flask, request, jsonify
+import uuid, time
+from datetime import datetime, timezone
+
+app = Flask(__name__)
+
+store = {"category": {}, "merchant": {}, "customer": {}, "trigger": {}}
+conversations = {}
+sent_keys = set()
+_start = time.time()
+
+
+@app.route("/v1/context", methods=["POST"])
+def ctx():
+    data = request.get_json(force=True)
+
+    scope = data.get("scope")
+    cid = data.get("context_id")
+    ver = data.get("version", 1)
+
+    if scope not in store:
+        return jsonify({"accepted": False, "reason": "invalid_scope"}), 400
+
+    existing = store[scope].get(cid, {})
+
+    if existing.get("version", 0) > ver:
+        return jsonify({
+            "accepted": False,
+            "reason": "stale_version",
+            "current_version": existing["version"]
+        }), 409
+
+    store[scope][cid] = {
+        "version": ver,
+        "payload": data.get("payload", {})
+    }
+
+    return jsonify({
+        "accepted": True,
+        "ack_id": f"ack_{uuid.uuid4().hex[:8]}",
+        "stored_at": datetime.now(timezone.utc).isoformat()
+    }), 200
+
+
 @app.route("/v1/tick", methods=["POST"])
 def tick():
     data = request.get_json(force=True)
@@ -6,90 +49,98 @@ def tick():
     actions = []
 
     for tid in trigger_ids:
-        trigger_record = store["trigger"].get(tid, {})
-        trigger = trigger_record.get("payload") or ds()["triggers"].get(tid)
+        trigger = store["trigger"].get(tid, {}).get("payload")
 
         if not trigger:
-            app.logger.error(f"tick skip {tid}: trigger missing")
             continue
 
-        sup = trigger.get("suppression_key", tid)
-        if sup in sent_keys:
-            app.logger.error(f"tick skip {tid}: suppressed ({sup})")
+        merchant_id = trigger.get("merchant_id")
+
+        if not merchant_id:
             continue
 
-        mid = (
-            trigger.get("merchant_id")
-            or trigger.get("merchant")
-            or trigger.get("merchantId")
+        body = (
+            f"Hi! Important update regarding {trigger.get('regulation', 'your business')} "
+            f"before {trigger.get('deadline', 'soon')}. "
+            f"Reply YES and I’ll help you handle it quickly."
         )
 
-        cust_id = (
-            trigger.get("customer_id")
-            or trigger.get("customer")
-            or trigger.get("customerId")
-        )
+        conv_id = f"conv_{uuid.uuid4().hex[:8]}"
 
-        if not mid:
-            app.logger.error(f"tick skip {tid}: merchant_id missing in trigger {trigger}")
-            continue
+        conversations[conv_id] = {
+            "merchant_id": merchant_id,
+            "trigger_id": tid,
+            "state": "open"
+        }
 
-        try:
-            cat, mer, trg, cust = resolve(mid, tid, cust_id)
-
-            if not mer:
-                app.logger.error(f"tick skip {tid}: merchant unresolved ({mid})")
-                continue
-
-            if not cat:
-                cat_slug = (
-                    mer.get("category_slug")
-                    or mer.get("category_id")
-                    or mer.get("category")
-                    or ""
-                )
-                cat = (
-                    store["category"].get(cat_slug, {}).get("payload")
-                    or ds()["categories"].get(cat_slug, {})
-                )
-
-            result = compose(cat, mer, trg, cust)
-
-            if not result or not result.get("body"):
-                app.logger.error(f"tick skip {tid}: compose returned empty result")
-                continue
-
-            conv_id = f"conv_{uuid.uuid4().hex[:8]}"
-
-            conversations[conv_id] = {
-                "merchant_id": mid,
-                "customer_id": cust_id,
-                "trigger_id": tid,
-                "state": "open",
-                "turns": [{"from": "vera", "body": result["body"]}],
-                "auto_reply_count": 0,
-            }
-
-            sent_keys.add(result.get("suppression_key", sup))
-
-            kind = trg.get("kind") or trg.get("trigger_kind") or "generic"
-            owner = _name(mer)
-
-            actions.append({
-                "conversation_id": conv_id,
-                "merchant_id": mid,
-                "customer_id": cust_id,
-                "send_as": result.get("send_as", "vera"),
-                "trigger_id": tid,
-                "template_name": f"vera_{kind}_v2",
-                "template_params": [owner, kind],
-                "body": result["body"],
-                "cta": result.get("cta", "open_ended"),
-                "suppression_key": result.get("suppression_key", sup),
-                "rationale": result.get("rationale", ""),
-            })
-
-        except Exception as e:
-            app.logger.error(f"tick compose error {tid}: {e}")
+        actions.append({
+            "conversation_id": conv_id,
+            "merchant_id": merchant_id,
+            "trigger_id": tid,
+            "send_as": "vera",
+            "template_name": "vera_regulation_change_v2",
+            "template_params": [],
+            "body": body,
+            "cta": "binary_yes_stop",
+            "suppression_key": tid,
+            "rationale": "Trigger-based compliance outreach"
+        })
 
     return jsonify({"actions": actions}), 200
+
+
+@app.route("/v1/reply", methods=["POST"])
+def reply():
+    data = request.get_json(force=True)
+
+    msg = data.get("message", "").lower()
+
+    if "yes" in msg:
+        return jsonify({
+            "action": "send",
+            "body": "Perfect — I’ll help you set this up right away.",
+            "cta": "none",
+            "rationale": "Positive merchant response"
+        }), 200
+
+    if "stop" in msg or "no" in msg:
+        return jsonify({
+            "action": "end",
+            "body": "Understood. Reach out anytime.",
+            "rationale": "Exit request"
+        }), 200
+
+    return jsonify({
+        "action": "send",
+        "body": "Could you share a bit more so I can help properly?",
+        "cta": "open_ended",
+        "rationale": "Fallback reply"
+    }), 200
+
+
+@app.route("/v1/healthz", methods=["GET"])
+def healthz():
+    return jsonify({
+        "status": "ok",
+        "uptime_seconds": int(time.time() - _start),
+        "active_conversations": len(conversations),
+        "suppressed_keys": len(sent_keys)
+    }), 200
+
+
+@app.route("/v1/metadata", methods=["GET"])
+def metadata():
+    return jsonify({
+        "team_name": "Mohamed Riyaas R",
+        "team_members": ["Mohamed Riyaas R"],
+        "model": "template-first",
+        "approach": "Deterministic Vera bot",
+        "contact_email": "mdriyaas68@gmail.com",
+        "version": "2.1.0"
+    }), 200
+
+
+if __name__ == "__main__":
+    import os
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
