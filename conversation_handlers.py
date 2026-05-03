@@ -1,16 +1,15 @@
 """
-conversation_handlers.py — Multi-Turn Conversation Handling
+conversation_handlers.py — Multi-Turn Conversation Handling v2
 magicpin AI Challenge — Mohamed Riyaas R
 
-Demonstrates:
-  1. Auto-reply detection (same message 2+ times = WA Business auto-reply)
-  2. Intent routing (explicit YES → action mode immediately)
-  3. Graceful exit (STOP / not interested)
-  4. Language detection per turn (switches Hindi/English mid-conversation)
-  5. 3-strike dormancy exit (3 unanswered nudges → stop)
+Fixed in v2:
+  - Auto-reply: end after FIRST failed attempt (server.py aligned)
+  - Added slot_pick intent for customer booking confirmations
+  - Added customer branch (from_role awareness)
+  - 3-strike dormancy exit stays the same
 """
 
-import json, re
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -20,193 +19,373 @@ class ConversationState:
     merchant_id: str
     customer_id: Optional[str]
     trigger_id: str
+    from_role: str = "merchant"          # "merchant" | "customer"
     turns: list = field(default_factory=list)
-    status: str = "open"   # open | ended | waiting
+    status: str = "open"                 # open | ended | waiting
     unanswered_count: int = 0
     auto_reply_count: int = 0
 
-# ── Auto-reply detector ───────────────────────────────────────────────────────
-AUTO_REPLY_PATTERNS = [
-    r"aapki jaankari ke liye.*shukriya",
-    r"thank you for contact",
-    r"i am (currently )?unavailable",
-    r"will get back to you",
-    r"out of office",
-    r"automated (message|reply|response)",
-    r"main ek automated",
-    r"hum aapko jald",
-]
 
-def is_auto_reply(message: str, prior_messages: list[str]) -> bool:
-    msg = message.lower().strip()
-    # Pattern match
-    for pat in AUTO_REPLY_PATTERNS:
-        if re.search(pat, msg):
-            return True
-    # Same message appeared before
-    if prior_messages.count(message) >= 1:
+# ── Auto-reply detector ───────────────────────────────────────────────────────
+AUTO_REPLY_RE = re.compile(
+    r"(aapki jaankari ke liye|thank you for contact|i am (currently )?unavailable"
+    r"|will get back to you|out of office|automated (message|reply|response)"
+    r"|main ek automated|hum aapko jald)", re.I
+)
+
+def is_auto_reply(message: str, prior_msgs: list) -> bool:
+    if AUTO_REPLY_RE.search(message):
+        return True
+    if prior_msgs.count(message) >= 1 and len(message) > 20:
         return True
     return False
 
+
 # ── Intent detector ───────────────────────────────────────────────────────────
-POSITIVE_INTENTS = [
+POSITIVE = [
     "yes", "ok", "sure", "haan", "bilkul", "karo", "go ahead",
-    "please do", "let's do", "start", "shuru karo", "proceed",
-    "mujhe judrna hai", "join karna hai", "send kar do", "draft kar do"
+    "please do", "let's do", "start", "shuru", "proceed",
+    "send kar", "draft kar", "book kar"
 ]
 
-EXIT_INTENTS = [
-    "no", "nahi", "stop", "not interested", "leave me", "baad mein",
-    "later", "cancel", "unsubscribe", "mat karo", "band karo"
+EXIT = [
+    "no", "nahi", "stop", "not interested", "baad mein",
+    "later", "cancel", "unsubscribe", "mat karo", "band karo", "not now"
 ]
+
+SLOT_RE = re.compile(
+    r'\b(1|2|3|wed|thu|fri|sat|sun|mon|6pm|5pm|7pm|8am|9am|book|confirm|slot)\b',
+    re.I
+)
 
 def detect_intent(message: str) -> str:
-    """Returns 'positive' | 'exit' | 'question' | 'neutral'"""
-    msg = message.lower()
-    if any(s in msg for s in POSITIVE_INTENTS): return "positive"
-    if any(s in msg for s in EXIT_INTENTS): return "exit"
-    if "?" in msg or any(w in msg for w in ["kya", "how", "when", "kab", "kitna", "kaun"]): return "question"
+    m = message.lower()
+
+    if any(s in m for s in EXIT):
+        return "exit"
+
+    if SLOT_RE.search(m):
+        return "slot_pick"
+
+    if any(s in m for s in POSITIVE):
+        return "positive"
+
+    if "?" in m or any(
+        w in m for w in [
+            "kya", "how", "when", "kab", "kitna",
+            "kaun", "what", "which"
+        ]
+    ):
+        return "question"
+
     return "neutral"
+
 
 # ── Language detector ─────────────────────────────────────────────────────────
 def detect_language(message: str) -> str:
-    """Simple heuristic: count Hindi Unicode chars."""
-    hindi_chars = sum(1 for c in message if '\u0900' <= c <= '\u097F')
-    if hindi_chars > 3: return "hi"
-    # Romanized Hindi keywords
-    hindi_words = ["karo", "haan", "nahi", "kya", "aap", "main", "mujhe", "hai", "tha"]
-    if sum(1 for w in hindi_words if w in message.lower()) >= 2: return "hi-en"
+    hi_chars = sum(1 for c in message if '\u0900' <= c <= '\u097F')
+
+    if hi_chars > 3:
+        return "hi"
+
+    hi_words = [
+        "karo", "haan", "nahi", "kya",
+        "aap", "main", "mujhe", "hai", "tha", "ek", "ki"
+    ]
+
+    if sum(1 for w in hi_words if w in message.lower()) >= 2:
+        return "hi-en"
+
     return "en"
 
-# ── Main respond function ─────────────────────────────────────────────────────
-def respond(state: ConversationState, merchant_message: str) -> dict:
-    """
-    Given conversation state + merchant's latest message, return the next move.
-    Returns dict with keys: action (send|wait|end), body (if send), cta, rationale.
-    """
-    prior_merchant_msgs = [t["body"] for t in state.turns if t.get("from") == "merchant"]
 
-    # 1. Auto-reply detection
-    if is_auto_reply(merchant_message, prior_merchant_msgs):
-        state.auto_reply_count += 1
-        if state.auto_reply_count == 1:
-            # Try once to get through
-            state.turns.append({"from": "merchant", "body": merchant_message, "tag": "auto_reply"})
+# ── Main respond function ─────────────────────────────────────────────────────
+def respond(state: ConversationState, message: str) -> dict:
+    """
+    Given conversation state + latest message, return the bot's next move.
+    Returns dict:
+    {
+        action: send | wait | end,
+        body?,
+        cta?,
+        rationale
+    }
+    """
+
+    prior_msgs = [
+        t["body"]
+        for t in state.turns
+        if t.get("from") == state.from_role
+    ]
+
+    # ── CUSTOMER BRANCH ───────────────────────────────────────────────────────
+    if state.from_role == "customer":
+        it = detect_intent(message)
+
+        state.turns.append({
+            "from": "customer",
+            "body": message,
+            "intent": it
+        })
+
+        if it == "slot_pick":
+            m = message.lower()
+
+            slot = (
+                "Wednesday"
+                if ("wed" in m or m.strip() == "1")
+                else "Thursday"
+                if ("thu" in m or m.strip() == "2")
+                else "your preferred time"
+            )
+
+            body = (
+                f"Confirmed! Your appointment is booked for {slot}. "
+                f"We'll send a reminder an hour before. See you there! 😊"
+            )
+
+            state.turns.append({
+                "from": "vera",
+                "body": body
+            })
+
             return {
                 "action": "send",
-                "body": "Samajh gayi — aapki team tak pahunch gayi hogi. Kya aap khud 2 minute de sakte hain? Main aaj jo karna chahti thi woh 5-min ka kaam hai.",
-                "cta": "binary_yes_stop",
-                "rationale": "First auto-reply detected; one polite attempt to break through before exiting.",
+                "body": body,
+                "cta": "none",
+                "rationale": "Customer confirmed slot; warm booking confirmation; no further CTA."
             }
+
+        if it == "exit":
+            state.status = "ended"
+
+            return {
+                "action": "send",
+                "body": "No worries at all! Feel free to reach out whenever you're ready. We're here 😊",
+                "cta": "none",
+                "rationale": "Customer exit; warm close; door open."
+            }
+
+        if it == "positive":
+            body = "Perfect! I'll confirm the details and send you a reminder closer to the date."
+
+            state.turns.append({
+                "from": "vera",
+                "body": body
+            })
+
+            return {
+                "action": "send",
+                "body": body,
+                "cta": "none",
+                "rationale": "Customer confirmed; booking acknowledged."
+            }
+
+        body = "Thanks! Let me check the available options and get back to you shortly."
+
+        state.turns.append({
+            "from": "vera",
+            "body": body
+        })
+
+        return {
+            "action": "send",
+            "body": body,
+            "cta": "open_ended",
+            "rationale": "Customer neutral; acknowledging and following up."
+        }
+
+    # ── MERCHANT BRANCH ───────────────────────────────────────────────────────
+
+    # Auto-reply: try ONCE, then end
+    if is_auto_reply(message, prior_msgs):
+
+        if state.auto_reply_count == 0:
+            state.auto_reply_count = 1
+
+            state.turns.append({
+                "from": "merchant",
+                "body": message,
+                "tag": "auto_reply"
+            })
+
+            body = (
+                "Samajh gayi — aapki team tak pahunch gayi hogi. "
+                "Kya aap khud 2 minute de sakte hain? "
+                "Jo share karna tha woh 5-min ka useful kaam hai."
+            )
+
+            state.turns.append({
+                "from": "vera",
+                "body": body
+            })
+
+            return {
+                "action": "send",
+                "body": body,
+                "cta": "binary_yes_stop",
+                "rationale": "First auto-reply — one attempt to reach owner directly before exiting."
+            }
+
         else:
             state.status = "ended"
+
             return {
                 "action": "end",
-                "rationale": "Multiple auto-replies detected. Gracefully exiting — will retry via a different touchpoint.",
+                "rationale": "Second auto-reply. Gracefully exiting — will retry via different touchpoint."
             }
 
-    # Reset auto_reply_count on real reply
+    # Reset on real reply
     state.auto_reply_count = 0
 
-    # 2. Intent routing
-    intent = detect_intent(merchant_message)
-    lang = detect_language(merchant_message)
+    it = detect_intent(message)
+    lng = detect_language(message)
 
-    state.turns.append({"from": "merchant", "body": merchant_message, "intent": intent, "lang": lang})
-    state.unanswered_count = 0  # Reset on any reply
+    state.turns.append({
+        "from": "merchant",
+        "body": message,
+        "intent": it,
+        "lang": lng
+    })
 
-    if intent == "exit":
+    state.unanswered_count = 0
+
+    # Exit intent
+    if it == "exit":
         state.status = "ended"
-        if lang in ("hi", "hi-en"):
-            farewell = "Bilkul samajh gaya! Koi baat nahi — aap jab chahein tab wapas aa sakte hain. Best of luck! 🙂"
-        else:
-            farewell = "Understood — no problem at all. Feel free to reach out whenever you're ready. Best wishes!"
+
+        body = (
+            "Bilkul samajh gaya! Koi baat nahi — jab chahein wapas aa jayein. Best of luck! 🙂"
+            if lng in ("hi", "hi-en")
+            else
+            "Understood — no problem at all. Feel free to reach out whenever. Best wishes!"
+        )
+
+        state.turns.append({
+            "from": "vera",
+            "body": body
+        })
+
         return {
             "action": "send",
-            "body": farewell,
+            "body": body,
             "cta": "none",
-            "rationale": "Exit intent detected. Warm, non-pushy farewell. Door left open.",
+            "rationale": "Merchant exit; warm farewell; door left open."
         }
 
-    if intent == "positive":
-        # Execute the promised action immediately — don't re-pitch
-        if lang in ("hi", "hi-en"):
-            action_body = "Shukriya! Main abhi kaam shuru kar deti hoon. 10-15 minute mein aapko draft bhejti hoon — aap ek nazar dekh lena, phir main ise live kar dungi."
-        else:
-            action_body = "On it! I'll have the draft ready in 10-15 minutes. Take a quick look and I'll push it live once you confirm."
-        state.turns.append({"from": "vera", "body": action_body})
+    # Positive intent
+    if it == "positive":
+
+        body = (
+            "Shukriya! Main abhi kaam shuru kar deti hoon. "
+            "10-15 minute mein draft ready hoga — ek nazar dekh lena, phir live kar dungi."
+            if lng in ("hi", "hi-en")
+            else
+            "On it! Draft will be ready in 10-15 minutes. Quick look from your side and I'll push it live."
+        )
+
+        state.turns.append({
+            "from": "vera",
+            "body": body
+        })
+
         return {
             "action": "send",
-            "body": action_body,
+            "body": body,
             "cta": "none",
-            "rationale": "Positive intent → action mode immediately. No re-pitch. Confirming execution.",
+            "rationale": "Merchant accepted; execute immediately; no re-pitch."
         }
 
-    if intent == "question":
-        # Answer the question specifically — placeholder (real impl would call LLM)
-        if lang in ("hi", "hi-en"):
-            q_body = "Achha sawaal hai! Yeh detail mujhe check karni hogi — main 5 minute mein wapas aata hoon iske exact answer ke saath."
-        else:
-            q_body = "Good question — let me check that specific detail and get back to you in 5 minutes."
-        state.turns.append({"from": "vera", "body": q_body})
+    # Question intent
+    if it == "question":
+
+        body = (
+            "Achha sawaal hai! Yeh detail check karni hogi — 5 minute mein exact answer ke saath wapas aata hoon."
+            if lng in ("hi", "hi-en")
+            else
+            "Good question — let me check that specific detail and come back in 5 minutes with an accurate answer."
+        )
+
+        state.turns.append({
+            "from": "vera",
+            "body": body
+        })
+
         return {
             "action": "send",
-            "body": q_body,
+            "body": body,
             "cta": "open_ended",
-            "rationale": "Merchant asked a question; acknowledge and commit to specific answer. Don't guess.",
+            "rationale": "Merchant question; commit to specific answer; don't guess."
         }
 
-    # Neutral reply — continue conversation with next best step
-    # If 3 unanswered nudges, exit gracefully
+    # 3-strike dormancy exit
+    state.unanswered_count += 1
+
     if state.unanswered_count >= 3:
         state.status = "ended"
+
         return {
             "action": "end",
-            "rationale": "3 unanswered nudges. Gracefully exiting — will retry in 7 days.",
+            "rationale": "3 unanswered nudges. Gracefully exiting — retry in 7 days."
         }
 
-    # Default: light follow-up
-    if lang in ("hi", "hi-en"):
-        followup = "Samjha! Aur kuch hai jisme main madad kar sakti hoon? Ya fir is topic pe aage badhna chahenge?"
-    else:
-        followup = "Got it! Anything else I can help with, or shall we move ahead on this?"
-    state.turns.append({"from": "vera", "body": followup})
+    # Neutral continuation
+    body = (
+        "Samjha! Aur kuch hai jisme main madad kar sakti hoon?"
+        if lng in ("hi", "hi-en")
+        else
+        "Got it! Anything else, or shall we move forward on this?"
+    )
+
+    state.turns.append({
+        "from": "vera",
+        "body": body
+    })
+
     return {
         "action": "send",
-        "body": followup,
+        "body": body,
         "cta": "open_ended",
-        "rationale": "Neutral reply — soft continuation to keep conversation open.",
+        "rationale": "Neutral reply; light continuation to keep conversation open."
     }
 
 
-# ── Demo: simulate a 4-turn conversation ─────────────────────────────────────
+# ── Demo ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+
+    print("=== TEST 1: Merchant conversation ===\n")
+
     state = ConversationState(
         conversation_id="demo_001",
-        merchant_id="m_001_drmeera_dentist_delhi",
+        merchant_id="m_001",
         customer_id=None,
-        trigger_id="trg_001_research_digest_dentists",
+        trigger_id="trg_001",
+        from_role="merchant",
         turns=[
-            {"from": "vera", "body": "Dr. Meera, JIDA's Oct issue landed — 2,100-patient trial showed 3-month fluoride recall cuts caries 38% better. Want me to pull the abstract + draft a patient-ed WhatsApp?"}
+            {
+                "from": "vera",
+                "body": "Dr. Meera, JIDA's Oct issue — 38% caries reduction. Want me to pull it?"
+            }
         ]
     )
 
-    test_replies = [
-        "Yes please, sounds useful",                          # → positive intent → action mode
-        "Also can you check my profile completion?",          # → question
-        "Aapki jaankari ke liye bahut shukriya…",            # → auto-reply
-        "Aapki jaankari ke liye bahut shukriya…",            # → auto-reply again → exit
+    test_messages = [
+        "Yes please",
+        "Can you also check my profile?",
+        "Aapki jaankari ke liye bahut shukriya…",
+        "Aapki jaankari ke liye bahut shukriya…"
     ]
 
-    print("=== MULTI-TURN CONVERSATION DEMO ===\n")
-    for i, msg in enumerate(test_replies):
-        print(f"[MERCHANT turn {i+1}]: {msg}")
+    for msg in test_messages:
+        print(f"[MERCHANT]: {msg}")
         result = respond(state, msg)
-        print(f"[VERA action]: {result['action']}")
+
+        print(f"[VERA ACTION]: {result['action']}")
+
         if result.get("body"):
-            print(f"[VERA body]: {result['body']}")
-        print(f"[rationale]: {result['rationale']}")
-        print()
+            print(f"[VERA BODY]: {result['body']}")
+
+        print(f"[RATIONALE]: {result['rationale']}\n")
+
         if result["action"] == "end":
-            print("Conversation ended gracefully.")
             break
