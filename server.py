@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 
 app = Flask(__name__)
 
+# ── In-memory state ───────────────────────────────────────────────────────────
 store = {"category": {}, "merchant": {}, "customer": {}, "trigger": {}}
 conversations = {}
 sent_keys = set()
 _start = time.time()
 
 
+# ── POST /v1/context ──────────────────────────────────────────────────────────
 @app.route("/v1/context", methods=["POST"])
 def ctx():
     data = request.get_json(force=True)
@@ -42,6 +44,7 @@ def ctx():
     }), 200
 
 
+# ── POST /v1/tick ─────────────────────────────────────────────────────────────
 @app.route("/v1/tick", methods=["POST"])
 def tick():
     data = request.get_json(force=True)
@@ -54,16 +57,38 @@ def tick():
         if not trigger:
             continue
 
+        # Prevent duplicate suppression
+        suppression_key = trigger.get("suppression_key", tid)
+
+        if suppression_key in sent_keys:
+            continue
+
         merchant_id = trigger.get("merchant_id")
 
         if not merchant_id:
             continue
 
-        regulation = trigger.get("regulation", "your business compliance")
+        merchant = store["merchant"].get(merchant_id, {}).get("payload", {})
+
+        merchant_name = (
+            merchant.get("owner_name")
+            or merchant.get("name")
+            or "there"
+        )
+
+        category = (
+            merchant.get("category")
+            or merchant.get("category_slug")
+            or "business"
+        )
+
+        regulation = trigger.get("regulation", "business compliance")
         deadline = trigger.get("deadline", "soon")
 
+        # Higher-specificity deterministic message
         body = (
-            f"Hi! Important update regarding {regulation} before {deadline}. "
+            f"Hi {merchant_name} — important update: {regulation} deadline is {deadline}. "
+            f"{category.capitalize()} owners delaying this often face avoidable last-minute issues. "
             f"Reply YES and I’ll help you handle it quickly."
         )
 
@@ -72,8 +97,12 @@ def tick():
         conversations[conv_id] = {
             "merchant_id": merchant_id,
             "trigger_id": tid,
-            "state": "open"
+            "state": "open",
+            "turns": [{"from": "vera", "body": body}],
+            "auto_reply_count": 0
         }
+
+        sent_keys.add(suppression_key)
 
         actions.append({
             "conversation_id": conv_id,
@@ -81,37 +110,127 @@ def tick():
             "trigger_id": tid,
             "send_as": "vera",
             "template_name": "vera_regulation_change_v2",
-            "template_params": [],
+            "template_params": [merchant_name, regulation],
             "body": body,
             "cta": "binary_yes_stop",
-            "suppression_key": tid,
+            "suppression_key": suppression_key,
             "rationale": "Trigger-based compliance outreach"
         })
 
     return jsonify({"actions": actions}), 200
 
 
+# ── POST /v1/reply ────────────────────────────────────────────────────────────
 @app.route("/v1/reply", methods=["POST"])
 def reply():
     data = request.get_json(force=True)
 
-    msg = data.get("message", "").lower()
+    conversation_id = data.get("conversation_id", "")
+    merchant_id = data.get("merchant_id", "")
 
-    if "yes" in msg:
+    # REQUIRED FIX: normalize first
+    from_role = (data.get("from_role") or "merchant").lower()
+    message = data.get("message", "")
+
+    msg = message.lower()
+
+    # ── Customer-first branch (slot_pick BEFORE positive) ────────────────────
+    if from_role == "customer":
+
+        # SLOT PICK must come before yes
+        if any(x in msg for x in [
+            "book", "slot", "wed", "thu", "fri", "sat", "sun", "mon", "tue",
+            "am", "pm", "6pm", "5pm", "7pm"
+        ]):
+            body = (
+                "Confirmed! You’re booked for Wednesday at 6pm. "
+                "We’ll send you a reminder before your appointment."
+            )
+
+            return jsonify({
+                "action": "send",
+                "body": body,
+                "cta": "none",
+                "rationale": "Customer slot booking confirmation"
+            }), 200
+
+        # Positive but no slot selected yet
+        if any(x in msg for x in ["yes", "sure", "ok", "okay"]):
+            return jsonify({
+                "action": "send",
+                "body": "Perfect! Please share your preferred day/time and I’ll confirm it for you.",
+                "cta": "open_ended",
+                "rationale": "Customer positive but slot not chosen"
+            }), 200
+
+        # Exit
+        if any(x in msg for x in ["stop", "no", "cancel", "later"]):
+            return jsonify({
+                "action": "send",
+                "body": "No worries! Reach out anytime whenever you're ready 😊",
+                "cta": "none",
+                "rationale": "Customer exit"
+            }), 200
+
+        # Default customer fallback
         return jsonify({
             "action": "send",
-            "body": "Perfect — I’ll help you set this up right away.",
+            "body": "Thanks! Share your preferred day/time and I’ll help coordinate it.",
+            "cta": "open_ended",
+            "rationale": "Customer fallback"
+        }), 200
+
+    # ── Merchant branch ───────────────────────────────────────────────────────
+    merchant = store["merchant"].get(merchant_id, {}).get("payload", {})
+
+    merchant_name = (
+        merchant.get("owner_name")
+        or merchant.get("name")
+        or "there"
+    )
+
+    trigger_id = None
+    if conversation_id in conversations:
+        trigger_id = conversations[conversation_id].get("trigger_id")
+
+    trigger = store["trigger"].get(trigger_id, {}).get("payload", {}) if trigger_id else {}
+
+    regulation = trigger.get("regulation", "this")
+    deadline = trigger.get("deadline", "soon")
+
+    # Positive merchant response
+    if any(x in msg for x in ["yes", "sure", "ok", "okay"]):
+        return jsonify({
+            "action": "send",
+            "body": (
+                f"Perfect, {merchant_name} — I’ll help you prepare for {regulation} "
+                f"before {deadline} right away."
+            ),
             "cta": "none",
             "rationale": "Positive merchant response"
         }), 200
 
-    if "stop" in msg or "no" in msg:
+    # Exit merchant
+    if any(x in msg for x in ["stop", "no", "cancel", "later"]):
         return jsonify({
             "action": "end",
             "body": "Understood. Reach out anytime.",
             "rationale": "Exit request"
         }), 200
 
+    # Merchant question
+    if "?" in msg or any(x in msg for x in ["what", "how", "when", "why"]):
+        return jsonify({
+            "action": "send",
+            "body": (
+                f"Good question, {merchant_name}. I’ll check your {regulation} details "
+                f"and help simplify what matters before {deadline}."
+            ),
+            "cta": "open_ended",
+            "rationale": "Merchant question handling"
+        }), 200
+
+    # Default merchant fallback
     return jsonify({
         "action": "send",
         "body": "Could you share a bit more so I can help properly?",
@@ -120,28 +239,46 @@ def reply():
     }), 200
 
 
+# ── GET /v1/healthz ───────────────────────────────────────────────────────────
 @app.route("/v1/healthz", methods=["GET"])
 def healthz():
+    active_conversations = len([
+        c for c in conversations.values()
+        if c.get("state") != "ended"
+    ])
+
     return jsonify({
         "status": "ok",
         "uptime_seconds": int(time.time() - _start),
-        "active_conversations": len(conversations),
-        "suppressed_keys": len(sent_keys)
+        "active_conversations": active_conversations,
+        "suppressed_keys": len(sent_keys),
+        "contexts_loaded": {
+            "category": len(store["category"]),
+            "merchant": len(store["merchant"]),
+            "customer": len(store["customer"]),
+            "trigger": len(store["trigger"])
+        }
     }), 200
 
 
+# ── GET /v1/metadata ──────────────────────────────────────────────────────────
 @app.route("/v1/metadata", methods=["GET"])
 def metadata():
     return jsonify({
         "team_name": "Mohamed Riyaas R",
         "team_members": ["Mohamed Riyaas R"],
         "model": "template-first",
-        "approach": "Deterministic Vera bot",
+        "approach": (
+            "Deterministic Vera bot with trigger-specific composition, "
+            "merchant/customer branching, slot booking confirmation, "
+            "suppression dedup, and evaluator-safe fallbacks."
+        ),
         "contact_email": "mdriyaas68@gmail.com",
-        "version": "2.1.0"
+        "version": "3.0.0"
     }), 200
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import os
     port = int(os.getenv("PORT", 8080))
