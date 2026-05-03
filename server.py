@@ -201,12 +201,12 @@ def reply():
 
     # Positive merchant response
     if any(x in msg for x in ["yes", "sure", "ok", "okay"]):
-    return jsonify({
-        "action": "send",
-        "body": f"Perfect, {merchant_name} — I’ll help you handle this right away.",
-        "cta": "none",
-        "rationale": "Positive merchant response"
-    }), 200
+        return jsonify({
+            "action": "send",
+            "body": f"Perfect, {merchant_name} — I’ll help you handle this right away.",
+            "cta": "none",
+            "rationale": "Positive merchant response"
+        }), 200
 
     # Exit merchant
     if any(x in msg for x in ["stop", "no", "cancel", "later"]):
